@@ -2,10 +2,12 @@
 
 import functools
 import time
-from typing import Any, Callable, Dict
+from datetime import datetime
+from typing import Any, Callable, Dict, Optional
 
 from opentelemetry.trace import Status, StatusCode
 
+from shinzo.session import SessionTracker, SessionEvent, EventType
 from shinzo.telemetry import TelemetryManager
 from shinzo.types import TelemetryConfig, ObservabilityInstance
 from shinzo.utils import generate_uuid, get_runtime_info
@@ -30,15 +32,16 @@ def instrument_server(server: Any, config: Dict[str, Any] | TelemetryConfig) -> 
     instrumentation = McpServerInstrumentation(server, telemetry_manager)
     instrumentation.instrument()
 
-    return ObservabilityInstanceImpl(telemetry_manager)
+    return ObservabilityInstanceImpl(telemetry_manager, instrumentation)
 
 
 class ObservabilityInstanceImpl:
     """Implementation of the observability instance."""
 
-    def __init__(self, telemetry_manager: TelemetryManager):
-        """Initialize with a telemetry manager."""
+    def __init__(self, telemetry_manager: TelemetryManager, instrumentation: 'McpServerInstrumentation'):
+        """Initialize with a telemetry manager and instrumentation."""
         self.telemetry_manager = telemetry_manager
+        self.instrumentation = instrumentation
 
     async def start_active_span(
         self,
@@ -80,6 +83,36 @@ class McpServerInstrumentation:
         self.server = server
         self.telemetry_manager = telemetry_manager
         self.is_instrumented = False
+        self.session_tracker: Optional[SessionTracker] = None
+
+    async def enable_session_tracking(
+        self,
+        resource_uuid: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Enable session tracking for debugging and replay.
+
+        Args:
+            resource_uuid: UUID of the resource
+            metadata: Optional metadata to attach to the session
+        """
+        if not self.session_tracker:
+            self.session_tracker = SessionTracker(
+                self.telemetry_manager.config,
+                resource_uuid
+            )
+            await self.session_tracker.start(metadata)
+
+    def get_session_tracker(self) -> Optional[SessionTracker]:
+        """Get the session tracker instance."""
+        return self.session_tracker
+
+    async def complete_session(self) -> None:
+        """Complete the current session."""
+        if self.session_tracker:
+            await self.session_tracker.complete()
+            self.session_tracker = None
 
     def instrument(self) -> None:
         """Instrument the MCP server."""
@@ -188,16 +221,61 @@ class McpServerInstrumentation:
                 increment_counter(1)
 
                 start_time = time.time()
+                start_timestamp = datetime.now()
                 result = None
                 error = None
+
+                # Track tool call event if session tracking is enabled
+                if self.session_tracker and self.session_tracker.is_session_active():
+                    self.session_tracker.add_event(
+                        SessionEvent(
+                            timestamp=start_timestamp,
+                            event_type=EventType.TOOL_CALL,
+                            tool_name=name,
+                            input_data=params if self.telemetry_manager.config.enable_argument_collection else None,
+                            metadata={"method": method}
+                        )
+                    )
 
                 try:
                     result = await original_handler(*args, **kwargs)
                     span.set_status(Status(StatusCode.OK))
+
+                    # Track successful tool response
+                    if self.session_tracker and self.session_tracker.is_session_active():
+                        duration_ms = int((time.time() - start_time) * 1000)
+                        self.session_tracker.add_event(
+                            SessionEvent(
+                                timestamp=datetime.now(),
+                                event_type=EventType.TOOL_RESPONSE,
+                                tool_name=name,
+                                output_data=result if self.telemetry_manager.config.enable_argument_collection else None,
+                                duration_ms=duration_ms,
+                                metadata={"method": method}
+                            )
+                        )
                 except Exception as e:
                     error = e
                     span.set_status(Status(StatusCode.ERROR, str(e)))
                     span.set_attribute("error.type", type(e).__name__)
+
+                    # Track error event
+                    if self.session_tracker and self.session_tracker.is_session_active():
+                        duration_ms = int((time.time() - start_time) * 1000)
+                        self.session_tracker.add_event(
+                            SessionEvent(
+                                timestamp=datetime.now(),
+                                event_type=EventType.ERROR,
+                                tool_name=name,
+                                error_data={
+                                    "message": str(e),
+                                    "type": type(e).__name__,
+                                    "traceback": str(e.__traceback__) if hasattr(e, '__traceback__') else None
+                                },
+                                duration_ms=duration_ms,
+                                metadata={"method": method}
+                            )
+                        )
 
                 end_time = time.time()
                 duration = (end_time - start_time) * 1000  # Convert to ms
