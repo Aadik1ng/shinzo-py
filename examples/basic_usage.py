@@ -1,65 +1,36 @@
-"""Basic usage example for Shinzo Python SDK."""
+"""Basic usage example for Shinzo Python SDK with FastMCP."""
 
 import asyncio
-from mcp.server import Server
+from mcp.server.fastmcp import FastMCP
 from shinzo import instrument_server
 
+# Create FastMCP server
+mcp = FastMCP(name="shinzo-py-demo")
 
-async def main():
-    """Run a basic instrumented MCP server."""
-    # Create your MCP server
-    server = Server("example-mcp-server")
-
-    # Instrument it with Shinzo
-    observability = instrument_server(
-        server,
-        config={
-            "server_name": "example-mcp-server",
-            "server_version": "1.0.0",
-            "exporter_endpoint": "http://localhost:8000/v1/otlp",
-            "enable_tracing": True,
-            "enable_metrics": True,
-            "enable_argument_collection": True,
+# Instrument it with Shinzo
+observability = instrument_server(
+    mcp,
+    config={
+        "server_name": "shinzo-py-demo",
+        "server_version": "1.0.0",
+        "exporter_auth": {
+            "type": "bearer",
+            "token": "abc" # replace with your actual token
         }
-    )
+    }
+)
 
-    # Define your tools
-    @server.call_tool()
-    async def get_weather(city: str) -> str:
-        """Get weather for a city."""
-        # Simulate some work
-        await asyncio.sleep(0.1)
-        return f"Weather for {city}: Sunny, 72°F"
+@mcp.tool()
+def sum(a: int, b: int) -> int:
+    """Add two numbers together."""
+    return a + b
 
-    @server.call_tool()
-    async def calculate(operation: str, a: float, b: float) -> float:
-        """Perform a calculation."""
-        if operation == "add":
-            return a + b
-        elif operation == "subtract":
-            return a - b
-        elif operation == "multiply":
-            return a * b
-        elif operation == "divide":
-            if b == 0:
-                raise ValueError("Cannot divide by zero")
-            return a / b
-        else:
-            raise ValueError(f"Unknown operation: {operation}")
-
-    print("MCP server running with Shinzo instrumentation...")
-    print("Server will export telemetry to: http://localhost:8000/v1/otlp")
-
-    try:
-        # In a real application, the server would run indefinitely
-        # For this example, we'll just wait a bit
-        await asyncio.sleep(60)
-    finally:
-        # Clean shutdown
-        print("Shutting down...")
-        await observability.shutdown()
-        print("Shutdown complete")
-
+@mcp.tool()
+def get_weather(city: str, unit: str = "celsius") -> str:
+    """Get weather for a city."""
+    # This would normally call a weather API
+    return f"Weather in {city}: 22 degrees {unit[0].upper()}"
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    print("MCP server running with Shinzo instrumentation...")
+    mcp.run()

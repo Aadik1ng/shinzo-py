@@ -10,8 +10,6 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExport
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader, ConsoleMetricExporter
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.semconv.resource import ResourceAttributes
 from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
 
@@ -19,6 +17,7 @@ from shinzo.types import TelemetryConfig
 from shinzo.config import ConfigValidator, DEFAULT_CONFIG
 from shinzo.sanitizer import PIISanitizer
 from shinzo.utils import generate_uuid
+from shinzo.json_exporter import OTLPJsonSpanExporter, OTLPJsonMetricExporter
 
 
 class TelemetryManager:
@@ -33,7 +32,6 @@ class TelemetryManager:
         """
         ConfigValidator.validate(config)
 
-        # Merge with defaults
         self.config = config
         for key, value in DEFAULT_CONFIG.items():
             if not hasattr(config, key) or getattr(config, key) is None:
@@ -43,23 +41,21 @@ class TelemetryManager:
         self.session_start = time.time()
         self.is_initialized = False
 
-        # Initialize PII sanitizer if enabled
         self.pii_sanitizer: Optional[PIISanitizer] = None
         if self.config.enable_pii_sanitization:
             self.pii_sanitizer = config.pii_sanitizer or PIISanitizer()
 
-        # Create resource
-        resource = Resource(attributes={
-            ResourceAttributes.SERVICE_NAME: self.config.server_name,
-            ResourceAttributes.SERVICE_VERSION: self.config.server_version,
-            "mcp.session.id": self.session_id,
-        })
+        resource = Resource(
+            attributes={
+                ResourceAttributes.SERVICE_NAME: self.config.server_name,
+                ResourceAttributes.SERVICE_VERSION: self.config.server_version,
+                "mcp.session.id": self.session_id,
+            }
+        )
 
-        # Initialize tracing
         if self.config.enable_tracing:
             self._init_tracing(resource)
 
-        # Initialize metrics
         if self.config.enable_metrics:
             self._init_metrics(resource)
 
@@ -71,10 +67,16 @@ class TelemetryManager:
         if self.config.exporter_auth:
             auth = self.config.exporter_auth
             if auth.type == "bearer":
+                if not auth.token:
+                    raise ValueError("Bearer token is required for bearer authentication")
                 headers["Authorization"] = f"Bearer {auth.token}"
             elif auth.type == "apiKey":
+                if not auth.api_key:
+                    raise ValueError("API key is required for apiKey authentication")
                 headers["X-API-Key"] = auth.api_key
             elif auth.type == "basic":
+                if not auth.username or not auth.password:
+                    raise ValueError("Username and password are required for basic authentication")
                 credentials = f"{auth.username}:{auth.password}"
                 encoded = base64.b64encode(credentials.encode()).decode()
                 headers["Authorization"] = f"Basic {encoded}"
@@ -83,40 +85,33 @@ class TelemetryManager:
     def _init_tracing(self, resource: Resource) -> None:
         """Initialize tracing."""
         if self.config.exporter_type == "console":
-            exporter = ConsoleSpanExporter()
+            exporter: Any = ConsoleSpanExporter()
         else:
             headers = self._get_otlp_headers()
             endpoint = self.config.exporter_endpoint
-            if not endpoint.endswith("/"):
-                endpoint += "/"
-            endpoint += "traces"
-            exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers)
+            if not endpoint:
+                raise ValueError("Exporter endpoint is required for OTLP export")
+            exporter = OTLPJsonSpanExporter(endpoint=endpoint, headers=headers)
 
-        # Set up sampler
-        sampler = TraceIdRatioBased(self.config.sampling_rate)
-
-        # Create tracer provider
+        sampling_rate = self.config.sampling_rate if self.config.sampling_rate is not None else 1.0
+        sampler = TraceIdRatioBased(sampling_rate)
         provider = TracerProvider(resource=resource, sampler=sampler)
         processor = BatchSpanProcessor(exporter)
         provider.add_span_processor(processor)
         trace.set_tracer_provider(provider)
 
-        self.tracer = trace.get_tracer(
-            self.config.server_name,
-            self.config.server_version
-        )
+        self.tracer = trace.get_tracer(self.config.server_name, self.config.server_version)
 
     def _init_metrics(self, resource: Resource) -> None:
         """Initialize metrics."""
         if self.config.exporter_type == "console":
-            exporter = ConsoleMetricExporter()
+            exporter: Any = ConsoleMetricExporter()
         else:
             headers = self._get_otlp_headers()
             endpoint = self.config.exporter_endpoint
-            if not endpoint.endswith("/"):
-                endpoint += "/"
-            endpoint += "metrics"
-            exporter = OTLPMetricExporter(endpoint=endpoint, headers=headers)
+            if not endpoint:
+                raise ValueError("Exporter endpoint is required for OTLP export")
+            exporter = OTLPJsonMetricExporter(endpoint=endpoint, headers=headers)
 
         reader = PeriodicExportingMetricReader(
             exporter,
@@ -127,17 +122,9 @@ class TelemetryManager:
         provider = MeterProvider(resource=resource, metric_readers=[reader])
         metrics.set_meter_provider(provider)
 
-        self.meter = metrics.get_meter(
-            self.config.server_name,
-            self.config.server_version
-        )
+        self.meter = metrics.get_meter(self.config.server_name, self.config.server_version)
 
-    async def start_active_span(
-        self,
-        name: str,
-        attributes: Dict[str, Any],
-        fn: Callable
-    ) -> Any:
+    async def start_active_span(self, name: str, attributes: Dict[str, Any], fn: Callable) -> Any:
         """
         Start an active span and execute a function within it.
 
@@ -172,11 +159,7 @@ class TelemetryManager:
         if not self.is_initialized:
             raise RuntimeError("Telemetry not initialized")
 
-        histogram = self.meter.create_histogram(
-            name=name,
-            description=description,
-            unit=unit
-        )
+        histogram = self.meter.create_histogram(name=name, description=description, unit=unit)
 
         def record(value: float, attributes: Optional[Dict[str, Any]] = None) -> None:
             processed_attributes = self._process_telemetry_attributes_with_session_id(
@@ -201,11 +184,7 @@ class TelemetryManager:
         if not self.is_initialized:
             raise RuntimeError("Telemetry not initialized")
 
-        counter = self.meter.create_counter(
-            name=name,
-            description=description,
-            unit=unit
-        )
+        counter = self.meter.create_counter(name=name, description=description, unit=unit)
 
         def increment(value: int, attributes: Optional[Dict[str, Any]] = None) -> None:
             processed_attributes = self._process_telemetry_attributes_with_session_id(
@@ -216,9 +195,7 @@ class TelemetryManager:
         return increment
 
     def get_argument_attributes(
-        self,
-        params: Any,
-        prefix: str = "mcp.request.argument"
+        self, params: Any, prefix: str = "mcp.request.argument"
     ) -> Dict[str, Any]:
         """
         Extract attributes from parameters.
@@ -253,22 +230,18 @@ class TelemetryManager:
         """Record the session duration metric."""
         if self.config.enable_metrics:
             record_histogram = self.get_histogram(
-                "mcp.server.session.duration",
-                "MCP server session duration",
-                "s"
+                "mcp.server.session.duration", "MCP server session duration", "s"
             )
             duration = time.time() - self.session_start
             record_histogram(duration, {"mcp.session.id": self.session_id})
 
     def _process_telemetry_attributes_with_session_id(
-        self,
-        data: Optional[Dict[str, Any]] = None
+        self, data: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Process telemetry attributes and add session ID."""
-        return self.process_telemetry_attributes({
-            "mcp.session.id": self.session_id,
-            **(data or {})
-        })
+        return self.process_telemetry_attributes(
+            {"mcp.session.id": self.session_id, **(data or {})}
+        )
 
     def process_telemetry_attributes(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -282,12 +255,10 @@ class TelemetryManager:
         """
         processed_data = dict(data)
 
-        # Apply custom data processors
         if self.config.data_processors:
             for processor in self.config.data_processors:
                 processed_data = processor(processed_data)
 
-        # Apply PII sanitization
         if self.pii_sanitizer:
             processed_data = self.pii_sanitizer.sanitize(processed_data)
 
@@ -297,13 +268,11 @@ class TelemetryManager:
         """Shutdown the telemetry manager."""
         self._record_session_duration()
 
-        # Shutdown tracer provider
         if self.config.enable_tracing:
             tracer_provider = trace.get_tracer_provider()
             if hasattr(tracer_provider, "shutdown"):
                 tracer_provider.shutdown()
 
-        # Shutdown meter provider
         if self.config.enable_metrics:
             meter_provider = metrics.get_meter_provider()
             if hasattr(meter_provider, "shutdown"):

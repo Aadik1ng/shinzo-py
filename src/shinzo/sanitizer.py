@@ -38,7 +38,7 @@ class PIISanitizer:
         if not isinstance(data, dict):
             return data
 
-        sanitized = {}
+        sanitized: Dict[str, Any] = {}
         for key, value in data.items():
             if isinstance(value, str):
                 sanitized[key] = self._sanitize_string(value)
@@ -46,9 +46,11 @@ class PIISanitizer:
                 sanitized[key] = self.sanitize(value)
             elif isinstance(value, list):
                 sanitized[key] = [
-                    self._sanitize_string(item) if isinstance(item, str)
-                    else self.sanitize(item) if isinstance(item, dict)
-                    else item
+                    (
+                        self._sanitize_string(item)
+                        if isinstance(item, str)
+                        else self.sanitize(item) if isinstance(item, dict) else item
+                    )
                     for item in value
                 ]
             else:
