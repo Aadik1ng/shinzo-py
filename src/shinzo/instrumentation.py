@@ -180,7 +180,7 @@ class McpServerInstrumentation:
             Instrumented handler
         """
         base_attributes = {"mcp.method.name": method}
-        
+
         # Add operation-specific attributes
         if method.startswith("resources/"):
             base_attributes["mcp.resource.uri"] = name
@@ -276,7 +276,7 @@ class McpServerInstrumentation:
 
             # Determine if this is a resource or tool operation
             is_resource_operation = method.startswith("resources/")
-            
+
             if self.session_tracker and self.session_tracker.is_session_active():
                 if is_resource_operation:
                     # For resource operations, determine the event type
@@ -284,7 +284,7 @@ class McpServerInstrumentation:
                         event_type = EventType.RESOURCE_LIST
                     else:  # resources/read
                         event_type = EventType.RESOURCE_READ
-                    
+
                     self.session_tracker.add_event(
                         SessionEvent(
                             timestamp=start_timestamp,
@@ -323,14 +323,14 @@ class McpServerInstrumentation:
 
                 if self.session_tracker and self.session_tracker.is_session_active():
                     duration_ms = int((time.time() - start_time) * S_TO_MS)
-                    
+
                     if is_resource_operation:
                         # For resource operations, use the same event type for response
                         if method == "resources/list":
                             event_type = EventType.RESOURCE_LIST
                         else:  # resources/read
                             event_type = EventType.RESOURCE_READ
-                        
+
                         self.session_tracker.add_event(
                             SessionEvent(
                                 timestamp=datetime.now(),
@@ -420,9 +420,7 @@ class McpServerInstrumentation:
 
             def decorator(f: Callable) -> Callable:
                 resource_uri = kwargs.get("uri", f.__name__)
-                wrapped_func = self._create_instrumented_handler(
-                    f, "resources/read", resource_uri
-                )
+                wrapped_func = self._create_instrumented_handler(f, "resources/read", resource_uri)
                 result: Callable = original_resource(*args, **kwargs)(wrapped_func)
 
                 return result
@@ -478,4 +476,3 @@ class McpServerInstrumentation:
                 return decorator
 
             self.server.read_resource = instrumented_read_resource
-
